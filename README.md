@@ -5,14 +5,14 @@ SwitchCrypt do not suffer from them.
 
 ## Requirements
 - python >= 3.x
-- fusepy
+- libfuse
 - python3-fuse
 - python3-cryptography
 
 ## Usage
 
 Experiment 1: Run python script `exp1.py`  
-Experiment 2: Run python script `exp2.py`
+Experiment 2: Run python script `exp2.py my/mount/point/path`
 
 ## (New) Experimental Setup
 ```
@@ -84,6 +84,9 @@ backend.
 4. We can use stored versions to rollback backup & live filesystem to clean
    state after our attack, plausibly avoiding detection entirely.
 
+#### Experimental Setup
+Python environment configured. Run python script `exp1.py`.
+
 #### AES-XTS Vulnerability Experiment
 
 1. Setup fake filesystem (FF) with directory structure, a set of files, and a
@@ -105,8 +108,8 @@ backend.
 
 #### Argument SwitchCrypt Does Not Fail
 
-(Expand on this) The same attack doesn't work with SwitchCrypt because each
-write and overwrite occurs with a different keystream.
+The same attack doesn't work with StrongBox or SwitchCrypt because each write
+and overwrite occurs with a different keystream.
 
 ### Experiment 2: Evil Password Change (CPA)
 
@@ -130,8 +133,8 @@ The goal is to steal a user's password by taking advantage of XTS revealing when
 a sector has the same contents written to it twice. This can be done by
 passively observing the drive while actively attacking the service.
 
-### Experimental Setup
-Python environment configured. Run python script `exp1.py`.
+#### Experimental Setup
+Python environment configured. Run python script `exp2.py`.
 
 #### AES-XTS Vulnerability Experiment
 
