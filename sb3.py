@@ -13,6 +13,9 @@ from collections import namedtuple
 import fuse
 from fuse import Fuse, Stat, Direntry
 
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
 MIN_SIZE_BYTES = 16
 FILE_SIZE_BYTES = 512
 NUMBER_OF_FILES = 10
@@ -25,6 +28,9 @@ assert NUMBER_OF_GOAL_FILES >= 1 # Minimum number of goal files
 assert NUMBER_OF_FILES >= 1 # Makes *around* this many files
 assert NUMBER_OF_FILES >= NUMBER_OF_GOAL_FILES # Obviously
 
+AES_KEY = bytearray(os.urandom(32))
+XTS_TWEAK = bytearray(os.urandom(16))
+
 if os.environ.get('DEBUG_MODE') is not None:
     print("INFO: saw DEBUG_MODE, attach ('localhost', 5678) for ptvsd enabled!")
     ptvsd.enable_attach('localhost', 5678)
@@ -33,6 +39,8 @@ if not hasattr(fuse, '__version__'):
     raise RuntimeError("your fuse-py doesn't know of fuse.__version__, probably it's too old.")
 
 fuse.fuse_python_api = (0, 2)
+
+cipher = Cipher(algorithms.AES(AES_KEY), modes.XTS(XTS_TWEAK), backend=default_backend())
 
 class SB3Stat(Stat):
     def __init__(self):
@@ -104,12 +112,11 @@ class SB3File():
         self._backend = backend
         self.parent = parent
 
-    def setContents(self, contents):
-        assert len(contents) == self.sizeBytes
-        self._backend[self.offset : self.offset+self.sizeBytes] = contents
+    def setContents(self, buffer, offset):
+        self._backend[self.offset+offset : self.offset+offset+len(buffer)] = buffer
 
-    def getContents(self):
-        return bytes(self._backend[self.offset : self.offset+self.sizeBytes])
+    def getContents(self, size, offset):
+        return bytes(self._backend[self.offset+offset : self.offset+offset+size])
 
     def getAttr(self):
         stt = SB3Stat()
@@ -183,7 +190,7 @@ class StrongBox3(Fuse):
                 )
 
                 pointer.addEntry(file)
-                file.setContents(contents)
+                file.setContents(contents, 0)
 
                 offset += FILE_SIZE_BYTES
 
@@ -200,6 +207,8 @@ class StrongBox3(Fuse):
                 pointer = SB3Directory(name, parent=pointer)
                 pointer.getParent().addEntry(pointer)
 
+        self.commitBackendToFile()
+
     def _generateRandomString(self, length=0):
         if length <= 0:
             length = random.randint(1, 10)
@@ -208,6 +217,19 @@ class StrongBox3(Fuse):
 
     def getGoalFiles(self):
         return self.goalFiles.copy()
+
+    def commitBackendToFile(self):
+        with open('backend.data', 'wb') as file:
+            file.write(self.backend)
+
+        with open('backend_xts.data', 'wb') as file:
+            encryptor = cipher.encryptor()
+            file.write(encryptor.update(self.backend) + encryptor.finalize())
+
+    def restoreBackendFromFile(self):
+        with open('backend.data', 'rb') as file:
+            self.backend.clear()
+            self.backend += file.read()
 
     def getattr(self, path):
         try:
@@ -238,14 +260,37 @@ class StrongBox3(Fuse):
             if isinstance(entry, SB3Directory):
                 return -errno.EISDIR
 
-            # TODO: call AESXTS decrypt
+            # ? This means every read call will restore self.backup bytearray
+            # ? from backend.data file. This fact can be used to revert the
+            # ? filesystem back to a previous state
+            # self.restoreBackendFromFile()
+
             if offset < entry.sizeBytes:
                 if offset + size > entry.sizeBytes:
                     size = entry.sizeBytes - offset
 
-                buffer = self.backend[offset:offset+size]
+                buffer = entry.getContents(size, offset)
 
             return bytes(buffer)
+
+        except FileNotFoundError:
+            return -errno.ENOENT
+
+    def write(self, path, buffer, offset):
+        try:
+            entry = self.root.getEntryFromPath(path)
+            size = len(buffer)
+
+            if isinstance(entry, SB3Directory):
+                return -errno.EISDIR
+
+            if offset >= entry.sizeBytes or offset + size > entry.sizeBytes:
+                return -errno.EFBIG
+
+            entry.setContents(bytes(buffer), offset)
+            self.commitBackendToFile()
+
+            return len(buffer)
 
         except FileNotFoundError:
             return -errno.ENOENT
@@ -265,24 +310,6 @@ class StrongBox3(Fuse):
     def utimens(self, path, ts_acc, ts_mod):
         try:
             self.root.getEntryFromPath(path)
-        except FileNotFoundError:
-            return -errno.ENOENT
-
-    def write(self, path, buffer, offset):
-        try:
-            entry = self.root.getEntryFromPath(path)
-            size = len(buffer)
-
-            if isinstance(entry, SB3Directory):
-                return -errno.EISDIR
-
-            if offset >= entry.sizeBytes or offset + size > entry.sizeBytes:
-                return -errno.EFBIG
-
-            # TODO: call AESXTS encrypt
-            self.backend[offset:offset+size] = bytes(buffer)
-            return len(buffer)
-
         except FileNotFoundError:
             return -errno.ENOENT
 
@@ -314,14 +341,17 @@ Userspace StrongBox3 AES-XTS encrypted filesystem dummy filesystem.
 
         # ? Serialize goal files
         for fileMeta in goalFiles:
-            with open('{}{}{}'.format(GOAL_FILE_DIR, os.sep, fileMeta.name), 'wb') as file:
-                print('Goal file: {}'.format(fileMeta.name))
-                print('Goal path: {}'.format(fileMeta.path))
-                print('Goal hash: {}'.format(fileMeta.getHashedContents()))
+            fileActual = '{}{}{}'.format(GOAL_FILE_DIR, os.sep, fileMeta.name)
 
-                file.write(bytes('file:{}\n'.format(fileMeta.name), 'utf-8'))
-                file.write(bytes('hash:{}\n'.format(fileMeta.getHashedContents()), 'utf-8'))
-                file.write(bytes('size:{}\n'.format(fileMeta.sizeBytes), 'utf-8'))
+            print('Goal file: {}'.format(fileMeta.name))
+            print('Goal path: {}'.format(fileMeta.path))
+            print('Goal hash: {}'.format(fileMeta.getHashedContents()))
+
+            with open(fileActual, 'wb') as file:
                 file.write(fileMeta.getContents())
+
+            with open(fileActual, 'rb') as file:
+                print('File hash: {}'.format(hashlib.sha256(file.read()).hexdigest()[0:5]))
+                print('(two hashes should match!)')
 
         sb3.main()

@@ -89,7 +89,7 @@ Or, to run it all manually (can set env DEBUG_MODE=1 for sb3 to enable ptvsd):
 1. Run python script `./sb3.py path/to/mount/point`
 2. Run `tree path/to/mount/point` if you want to see what the fake filesystem
    looks like
-3. Run `./exp1.py path/to/mount/point `
+3. Run `./exp1.py`
 4. Run ``umount `realpath path/to/mount/point` `` to unmount the fake filesystem
 
 #### AES-XTS Vulnerability Experiment
@@ -189,3 +189,4 @@ used for every write.
 
 ### Experiment 3: Replay Attack
 
+(work in progress)
