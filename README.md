@@ -5,14 +5,14 @@ SwitchCrypt do not suffer from them.
 
 ## Requirements
 - python >= 3.x
-- libfuse
-- python3-fuse
 - python3-cryptography
+- libfuse (exp2 only)
+- python3-fuse (exp2 only)
 
 ## Usage
 
-Experiment 1: Run python script `exp1.py`  
-Experiment 2: Run python script `exp2.py my/mount/point/path`
+Experiment 1: Run `./exp1.sh`  
+Experiment 2: Run `./exp2.py`
 
 ## (New) Experimental Setup
 ```
@@ -82,8 +82,15 @@ backup service can query the filesystem structure at any time.
    state after our attack, plausibly avoiding detection entirely.
 
 #### Experimental Setup
-Python environment configured. Run python script `sb3.py path/to/mount/point`.
-Then run `exp1.py path/to/mount/point `.
+Ensure a python environment is configured. Run `./exp1.sh`.
+
+Or, to run it all manually (can set env DEBUG_MODE=1 for sb3 to enable ptvsd):
+
+1. Run python script `./sb3.py path/to/mount/point`
+2. Run `tree path/to/mount/point` if you want to see what the fake filesystem
+   looks like
+3. Run `./exp1.py path/to/mount/point `
+4. Run ``umount `realpath path/to/mount/point` `` to unmount the fake filesystem
 
 #### AES-XTS Vulnerability Experiment
 
@@ -132,7 +139,7 @@ a sector has the same contents written to it twice. This can be done by
 passively observing the drive while actively attacking the service.
 
 #### Experimental Setup
-Python environment configured. Run python script `exp2.py`.
+Ensure a python environment is configured. Run python script `./exp2.py`.
 
 #### AES-XTS Vulnerability Experiment
 

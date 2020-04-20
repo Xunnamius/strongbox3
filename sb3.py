@@ -7,6 +7,7 @@ import string
 import random
 import stat
 import hashlib
+import ptvsd
 
 from collections import namedtuple
 import fuse
@@ -17,11 +18,16 @@ FILE_SIZE_BYTES = 512
 NUMBER_OF_FILES = 10
 NUMBER_OF_GOAL_FILES = 1
 GOAL_FILE_DIR = 'goals'
+FILE_EXT = 'xts'
 
 assert FILE_SIZE_BYTES >= 16 # AES prim needs 16 bytes to work with
 assert NUMBER_OF_GOAL_FILES >= 1 # Minimum number of goal files
 assert NUMBER_OF_FILES >= 1 # Makes *around* this many files
 assert NUMBER_OF_FILES >= NUMBER_OF_GOAL_FILES # Obviously
+
+if os.environ.get('DEBUG_MODE') is not None:
+    print("INFO: saw DEBUG_MODE, attach ('localhost', 5678) for ptvsd enabled!")
+    ptvsd.enable_attach('localhost', 5678)
 
 if not hasattr(fuse, '__version__'):
     raise RuntimeError("your fuse-py doesn't know of fuse.__version__, probably it's too old.")
@@ -103,7 +109,7 @@ class SB3File():
         self._backend[self.offset : self.offset+self.sizeBytes] = contents
 
     def getContents(self):
-        return self._backend[self.offset : self.offset+self.sizeBytes]
+        return bytes(self._backend[self.offset : self.offset+self.sizeBytes])
 
     def getAttr(self):
         stt = SB3Stat()
@@ -159,19 +165,19 @@ class StrongBox3(Fuse):
                 else:
                     break
 
-            path = pointer.getPath()
             forceMakeGoalFile = amongLastIterations and numGoalFilesToMake > 0
 
             # Add the directory or file and ensure at least `numGoalFilesToMake`
             # file gets written
             if forceMakeGoalFile or not isDir:
                 isGoalFile = forceMakeGoalFile or (numGoalFilesToMake > 0 and random.choice([True, False]))
-                contents = bytearray(os.urandom(FILE_SIZE_BYTES))
+                # ? Ensure we're dealing with ASCII characters for easy debug
+                contents = bytes([ord('0')] + ([(ord('1') + fileIndex) % ord('z')] * (FILE_SIZE_BYTES - 2)) + [ord('0')])
 
                 file = SB3File(
                     parent=pointer,
                     backend=self.backend,
-                    name=name,
+                    name='{}.{}'.format(name, FILE_EXT),
                     offset=offset,
                     sizeBytes=FILE_SIZE_BYTES
                 )
@@ -184,18 +190,15 @@ class StrongBox3(Fuse):
                 if isGoalFile:
                     numGoalFilesToMake -= 1
                     self.goalFiles.append(SB3GoalFile(
-                        name=name,
-                        path=path,
+                        name=file.name,
+                        path=file.getPath(),
                         sizeBytes=FILE_SIZE_BYTES,
-                        contents=contents.copy()
+                        contents=bytes(contents)
                     ))
 
             else:
                 pointer = SB3Directory(name, parent=pointer)
                 pointer.getParent().addEntry(pointer)
-
-    # Helpers
-    # =======
 
     def _generateRandomString(self, length=0):
         if length <= 0:
@@ -206,9 +209,6 @@ class StrongBox3(Fuse):
     def getGoalFiles(self):
         return self.goalFiles.copy()
 
-    # Filesystem methods
-    # ==================
-
     def getattr(self, path):
         try:
             entry = self.root.getEntryFromPath(path)
@@ -217,26 +217,79 @@ class StrongBox3(Fuse):
 
         return entry.getAttr()
 
-    def readdir(self, path, fh=None):
+    def readdir(self, path, offset):
         directory = self.root.getEntryFromPath(path)
 
         for ent in directory.getEntries():
             yield Direntry(ent)
 
-    # File methods
-    # ============
-
     def open(self, path, flags):
-        full_path = self._full_path(path)
-        return os.open(full_path, flags)
+        try:
+            if isinstance(self.root.getEntryFromPath(path), SB3Directory):
+                return -errno.EISDIR
+        except FileNotFoundError:
+            return -errno.ENOENT
 
-    def read(self, path, length, offset, fh=None):
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.read(fh, length)
+    def read(self, path, size, offset):
+        buffer = b''
 
-    def write(self, path, buf, offset, fh=None):
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.write(fh, buf)
+        try:
+            entry = self.root.getEntryFromPath(path)
+            if isinstance(entry, SB3Directory):
+                return -errno.EISDIR
+
+            # TODO: call AESXTS decrypt
+            if offset < entry.sizeBytes:
+                if offset + size > entry.sizeBytes:
+                    size = entry.sizeBytes - offset
+
+                buffer = self.backend[offset:offset+size]
+
+            return bytes(buffer)
+
+        except FileNotFoundError:
+            return -errno.ENOENT
+
+    def mknod(self, path, mode, dev):
+        try:
+            self.root.getEntryFromPath(path)
+        except FileNotFoundError:
+            return -errno.EINVAL
+
+    def utime(self, path, times):
+        try:
+            self.root.getEntryFromPath(path)
+        except FileNotFoundError:
+            return -errno.ENOENT
+
+    def utimens(self, path, ts_acc, ts_mod):
+        try:
+            self.root.getEntryFromPath(path)
+        except FileNotFoundError:
+            return -errno.ENOENT
+
+    def write(self, path, buffer, offset):
+        try:
+            entry = self.root.getEntryFromPath(path)
+            size = len(buffer)
+
+            if isinstance(entry, SB3Directory):
+                return -errno.EISDIR
+
+            if offset >= entry.sizeBytes or offset + size > entry.sizeBytes:
+                return -errno.EFBIG
+
+            # TODO: call AESXTS encrypt
+            self.backend[offset:offset+size] = bytes(buffer)
+            return len(buffer)
+
+        except FileNotFoundError:
+            return -errno.ENOENT
+
+    # ! Required for openat() syscall to work with FUSE or you get ENOSYS error
+    def truncate(self, path, length):
+        retval = self.write(path, bytes([0x0] * FILE_SIZE_BYTES), 0)
+        return 0 if retval >= 0 else retval
 
 if __name__ == '__main__':
     usage = """
@@ -249,18 +302,19 @@ Userspace StrongBox3 AES-XTS encrypted filesystem dummy filesystem.
 
     # ? Catch empty invocation
     if len(sys.argv) == 1:
-        sys.argv.append('-h')
+        print('WARNING: no mountpoint specified, assuming "test"...')
+        sys.argv.append('test')
 
     args = sb3.parse(errex=1)
 
     if args.mount_expected() and args.mountpoint is not None:
         # ? Clear out GOAL_FILE_DIR of all goal files (and keep .gitkeep)
-        for file in [f for f in os.listdir(GOAL_FILE_DIR) if f.endswith('.goal')]:
+        for file in [f for f in os.listdir(GOAL_FILE_DIR) if f.endswith('.{}'.format(FILE_EXT))]:
             os.remove(os.path.join(GOAL_FILE_DIR, file))
 
         # ? Serialize goal files
         for fileMeta in goalFiles:
-            with open('{}{}{}.goal'.format(GOAL_FILE_DIR, os.sep, fileMeta.name), 'wb') as file:
+            with open('{}{}{}'.format(GOAL_FILE_DIR, os.sep, fileMeta.name), 'wb') as file:
                 print('Goal file: {}'.format(fileMeta.name))
                 print('Goal path: {}'.format(fileMeta.path))
                 print('Goal hash: {}'.format(fileMeta.getHashedContents()))
