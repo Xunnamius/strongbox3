@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+
+import sys
 import os
 import errno
 import string
@@ -13,6 +16,12 @@ MIN_SIZE_BYTES = 16
 FILE_SIZE_BYTES = 512
 NUMBER_OF_FILES = 10
 NUMBER_OF_GOAL_FILES = 1
+GOAL_FILE_DIR = 'goals'
+
+assert FILE_SIZE_BYTES >= 16 # AES prim needs 16 bytes to work with
+assert NUMBER_OF_GOAL_FILES >= 1 # Minimum number of goal files
+assert NUMBER_OF_FILES >= 1 # Makes *around* this many files
+assert NUMBER_OF_FILES >= NUMBER_OF_GOAL_FILES # Obviously
 
 if not hasattr(fuse, '__version__'):
     raise RuntimeError("your fuse-py doesn't know of fuse.__version__, probably it's too old.")
@@ -127,26 +136,18 @@ class StrongBox3(Fuse):
     def __init__(self, *args, **kw):
         Fuse.__init__(self, *args, **kw)
 
-        fileSizeBytes = FILE_SIZE_BYTES
-        numberOfFiles = NUMBER_OF_FILES
-        numberOfGoalFiles = NUMBER_OF_GOAL_FILES
-
-        assert fileSizeBytes >= 16 # AES prim needs 16 bytes to work with
-        assert numberOfGoalFiles >= 1 # Minimum number of goal files
-        assert numberOfFiles >= 1 # Makes *around* this many files
-
         self.backend = bytearray()
         self.root = SB3Directory(name='/')
         self.goalFiles = []
 
         pointer = self.root
         offset = 0
-        madeFile = False
+        numGoalFilesToMake = NUMBER_OF_GOAL_FILES
 
-        for fileIndex in range(numberOfFiles):
+        for fileIndex in range(NUMBER_OF_FILES):
             isDir = random.choice([True, False])
             name = ''.join(self._generateRandomString())
-            isLastIteration = fileIndex == numberOfFiles - 1
+            amongLastIterations = fileIndex >= NUMBER_OF_FILES - NUMBER_OF_GOAL_FILES
 
             # Randomly determine where we want to place this file or directory
             while pointer != self.root:
@@ -159,35 +160,35 @@ class StrongBox3(Fuse):
                     break
 
             path = pointer.getPath()
+            forceMakeGoalFile = amongLastIterations and numGoalFilesToMake > 0
 
-            # Add the directory or file and ensure at least 1 file gets written
-            if not isDir or (isLastIteration and not madeFile):
-                isGoalFile = random.choice([True, False]) and numberOfGoalFiles > 0
-                contents = bytearray(os.urandom(fileSizeBytes))
+            # Add the directory or file and ensure at least `numGoalFilesToMake`
+            # file gets written
+            if forceMakeGoalFile or not isDir:
+                isGoalFile = forceMakeGoalFile or (numGoalFilesToMake > 0 and random.choice([True, False]))
+                contents = bytearray(os.urandom(FILE_SIZE_BYTES))
 
                 file = SB3File(
                     parent=pointer,
                     backend=self.backend,
                     name=name,
                     offset=offset,
-                    sizeBytes=fileSizeBytes
+                    sizeBytes=FILE_SIZE_BYTES
                 )
 
                 pointer.addEntry(file)
                 file.setContents(contents)
 
-                offset += fileSizeBytes
+                offset += FILE_SIZE_BYTES
 
-                if isGoalFile or (isLastIteration and not madeFile):
-                    numberOfGoalFiles -= 1
+                if isGoalFile:
+                    numGoalFilesToMake -= 1
                     self.goalFiles.append(SB3GoalFile(
                         name=name,
                         path=path,
-                        sizeBytes=fileSizeBytes,
+                        sizeBytes=FILE_SIZE_BYTES,
                         contents=contents.copy()
                     ))
-
-                madeFile = True
 
             else:
                 pointer = SB3Directory(name, parent=pointer)
@@ -236,3 +237,37 @@ class StrongBox3(Fuse):
     def write(self, path, buf, offset, fh=None):
         os.lseek(fh, offset, os.SEEK_SET)
         return os.write(fh, buf)
+
+if __name__ == '__main__':
+    usage = """
+Userspace StrongBox3 AES-XTS encrypted filesystem dummy filesystem.
+
+""" + Fuse.fusage
+
+    sb3 = StrongBox3(version="%prog " + fuse.__version__, usage=usage, dash_s_do='setsingle')
+    goalFiles = sb3.getGoalFiles()
+
+    # ? Catch empty invocation
+    if len(sys.argv) == 1:
+        sys.argv.append('-h')
+
+    args = sb3.parse(errex=1)
+
+    if args.mount_expected() and args.mountpoint is not None:
+        # ? Clear out GOAL_FILE_DIR of all goal files (and keep .gitkeep)
+        for file in [f for f in os.listdir(GOAL_FILE_DIR) if f.endswith('.goal')]:
+            os.remove(os.path.join(GOAL_FILE_DIR, file))
+
+        # ? Serialize goal files
+        for fileMeta in goalFiles:
+            with open('{}{}{}.goal'.format(GOAL_FILE_DIR, os.sep, fileMeta.name), 'wb') as file:
+                print('Goal file: {}'.format(fileMeta.name))
+                print('Goal path: {}'.format(fileMeta.path))
+                print('Goal hash: {}'.format(fileMeta.getHashedContents()))
+
+                file.write(bytes('file:{}\n'.format(fileMeta.name), 'utf-8'))
+                file.write(bytes('hash:{}\n'.format(fileMeta.getHashedContents()), 'utf-8'))
+                file.write(bytes('size:{}\n'.format(fileMeta.sizeBytes), 'utf-8'))
+                file.write(fileMeta.getContents())
+
+        sb3.main()

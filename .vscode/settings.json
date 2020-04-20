@@ -1,11 +1,15 @@
 {
-    "python.linting.enabled": true,
-    "python.linting.pylintEnabled": true,
-    "python.linting.mypyEnabled": false,
-    "cSpell.words": [
-        "FF's",
-        "fusage",
-        "fusefs",
-        "nothreads"
-    ]
+  "python.linting.enabled": true,
+  "python.linting.pylintEnabled": true,
+  "python.linting.mypyEnabled": false,
+  "cSpell.words": [
+    "FF's",
+    "errex",
+    "fusage",
+    "fusefs",
+    "nothreads"
+  ],
+  "files.exclude": {
+    "test": true
+  }
 }
