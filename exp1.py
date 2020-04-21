@@ -24,6 +24,8 @@ def main():
 
             print('Trying file {}...'.format(targetFilename))
 
+            os.sync()
+
             # * Also forces sb3 to restore from backend.data file
             with open(targetFilename, 'rb', 0) as targetFile:
                 targetFile.read()
@@ -33,7 +35,8 @@ def main():
                 oldXTSContents = xtsFile.read()
 
             with open(targetFilename, 'wb', 0) as targetFile:
-                file.write(goalFileContents)
+                targetFile.write(goalFileContents)
+                os.sync()
 
             with open('backend_xts.data', 'rb', 0) as xtsFile:
                 newXTSContents = xtsFile.read()
@@ -42,8 +45,9 @@ def main():
                 print('SUCCESS: found goalfile under path {} via XTS ciphertext match'.format(targetFilename))
                 return
 
-            with open('backend_xts.data', 'wb', 0) as xtsFile:
-                xtsFile.write(oldBackendContents)
+            with open('backend.data', 'wb', 0) as backendFile:
+                backendFile.write(oldBackendContents)
+                os.sync()
 
     print('FAILURE: goalfile was not found via XTS ciphertext match')
 

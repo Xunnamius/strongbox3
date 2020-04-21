@@ -339,6 +339,7 @@ Userspace StrongBox3 AES-XTS encrypted filesystem dummy filesystem.
         print('WARNING: no mountpoint specified, assuming "test"...')
         sys.argv.append('test')
 
+    sys.argv.append('-oallow_other')
     args = sb3.parse(errex=1)
 
     if args.mount_expected() and args.mountpoint is not None:
