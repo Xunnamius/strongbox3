@@ -219,17 +219,19 @@ class StrongBox3(Fuse):
         return self.goalFiles.copy()
 
     def commitBackendToFile(self):
-        with open('backend.data', 'wb') as file:
+        with open('backend.data', 'wb', 0) as file:
             file.write(self.backend)
 
-        with open('backend_xts.data', 'wb') as file:
+        with open('backend_xts.data', 'wb', 0) as file:
             encryptor = cipher.encryptor()
             file.write(encryptor.update(self.backend) + encryptor.finalize())
 
     def restoreBackendFromFile(self):
-        with open('backend.data', 'rb') as file:
+        with open('backend.data', 'rb', 0) as file:
             self.backend.clear()
             self.backend += file.read()
+
+        self.commitBackendToFile()
 
     def getattr(self, path):
         try:
@@ -263,7 +265,7 @@ class StrongBox3(Fuse):
             # ? This means every read call will restore self.backup bytearray
             # ? from backend.data file. This fact can be used to revert the
             # ? filesystem back to a previous state
-            # self.restoreBackendFromFile()
+            self.restoreBackendFromFile()
 
             if offset < entry.sizeBytes:
                 if offset + size > entry.sizeBytes:
@@ -280,6 +282,11 @@ class StrongBox3(Fuse):
         try:
             entry = self.root.getEntryFromPath(path)
             size = len(buffer)
+
+            # ? This means every write call will restore self.backup bytearray
+            # ? from backend.data file. This fact can be used to revert the
+            # ? filesystem back to a previous state
+            self.restoreBackendFromFile()
 
             if isinstance(entry, SB3Directory):
                 return -errno.EISDIR
@@ -347,10 +354,10 @@ Userspace StrongBox3 AES-XTS encrypted filesystem dummy filesystem.
             print('Goal path: {}'.format(fileMeta.path))
             print('Goal hash: {}'.format(fileMeta.getHashedContents()))
 
-            with open(fileActual, 'wb') as file:
+            with open(fileActual, 'wb', 0) as file:
                 file.write(fileMeta.getContents())
 
-            with open(fileActual, 'rb') as file:
+            with open(fileActual, 'rb', 0) as file:
                 print('File hash: {}'.format(hashlib.sha256(file.read()).hexdigest()[0:5]))
                 print('(two hashes should match!)')
 
