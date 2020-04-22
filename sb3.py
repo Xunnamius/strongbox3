@@ -7,7 +7,7 @@ import string
 import random
 import stat
 import hashlib
-import ptvsd
+from datetime import datetime
 
 from collections import namedtuple
 import fuse
@@ -16,12 +16,16 @@ from fuse import Fuse, Stat, Direntry
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 
+# ? Since libfuse takes over from pyfuse/python-fuse, need all paths absolute
+CWD = os.getcwd()
+
 MIN_SIZE_BYTES = 16
 FILE_SIZE_BYTES = 512
 NUMBER_OF_FILES = 10
 NUMBER_OF_GOAL_FILES = 1
-GOAL_FILE_DIR = 'goals'
+GOAL_FILE_DIR = f'{CWD}{os.sep}goals'
 FILE_EXT = 'xts'
+
 
 assert FILE_SIZE_BYTES >= 16 # AES prim needs 16 bytes to work with
 assert NUMBER_OF_GOAL_FILES >= 1 # Minimum number of goal files
@@ -32,8 +36,16 @@ AES_KEY = bytearray(os.urandom(32))
 XTS_TWEAK = bytearray(os.urandom(16))
 
 if os.environ.get('DEBUG_MODE') is not None:
-    print("INFO: saw DEBUG_MODE, attach ('localhost', 5678) for ptvsd enabled!")
-    ptvsd.enable_attach('localhost', 5678)
+    print("INFO: debug mode enabled")
+
+    _logfd = open(f'{CWD}{os.sep}sb3-output.log', 'w')
+    def debugOutputToLog(*args):
+        print(f'[{datetime.now()}]  ', end='', file=_logfd)
+        print(*args, file=_logfd)
+        _logfd.flush()
+else:
+    def debugOutputToLog(*args):
+        pass
 
 if not hasattr(fuse, '__version__'):
     raise RuntimeError("your fuse-py doesn't know of fuse.__version__, probably it's too old.")
@@ -41,6 +53,9 @@ if not hasattr(fuse, '__version__'):
 fuse.fuse_python_api = (0, 2)
 
 cipher = Cipher(algorithms.AES(AES_KEY), modes.XTS(XTS_TWEAK), backend=default_backend())
+
+def filterLocals(fArgs):
+    return dict(filter(lambda el: el[0] != 'self', fArgs.items()))
 
 class SB3Stat(Stat):
     def __init__(self):
@@ -148,6 +163,8 @@ class SB3GoalFile():
 class StrongBox3(Fuse):
     def __init__(self, *args, **kw):
         Fuse.__init__(self, *args, **kw)
+        debugOutputToLog(f'creating SB3 instance with args {filterLocals(locals())}')
+        debugOutputToLog(f'CWD => {CWD}')
 
         self.backend = bytearray()
         self.root = SB3Directory(name='/')
@@ -184,7 +201,7 @@ class StrongBox3(Fuse):
                 file = SB3File(
                     parent=pointer,
                     backend=self.backend,
-                    name='{}.{}'.format(name, FILE_EXT),
+                    name=f'{name}.{FILE_EXT}',
                     offset=offset,
                     sizeBytes=FILE_SIZE_BYTES
                 )
@@ -207,7 +224,8 @@ class StrongBox3(Fuse):
                 pointer = SB3Directory(name, parent=pointer)
                 pointer.getParent().addEntry(pointer)
 
-        self.commitBackendToFile()
+        self.commitBackendDataToFile()
+        self.commitBackendXTSToFile()
 
     def _generateRandomString(self, length=0):
         if length <= 0:
@@ -218,54 +236,79 @@ class StrongBox3(Fuse):
     def getGoalFiles(self):
         return self.goalFiles.copy()
 
-    def commitBackendToFile(self):
-        with open('backend.data', 'wb', 0) as file:
+    def commitBackendDataToFile(self):
+        debugOutputToLog('committing backend data to file')
+
+        with open(f'{CWD}{os.sep}backend.data', 'wb', 0) as file:
             file.write(self.backend)
 
-        with open('backend_xts.data', 'wb', 0) as file:
+        debugOutputToLog('done')
+
+    def commitBackendXTSToFile(self):
+        debugOutputToLog('committing backend XTS to file')
+
+        with open(f'{CWD}{os.sep}backend_xts.data', 'wb', 0) as file:
             encryptor = cipher.encryptor()
             file.write(encryptor.update(self.backend) + encryptor.finalize())
 
-    def restoreBackendFromFile(self):
-        with open('backend.data', 'rb', 0) as file:
+        debugOutputToLog('done')
+
+    def restoreBackendDataFromFile(self):
+        debugOutputToLog('restoring backend data from file')
+
+        with open(f'{CWD}{os.sep}backend.data', 'rb', 0) as file:
             self.backend.clear()
             self.backend += file.read()
 
-        self.commitBackendToFile()
+        self.commitBackendXTSToFile()
+        debugOutputToLog('done')
 
     def getattr(self, path):
+        debugOutputToLog(f'entering getattr with args {filterLocals(locals())}')
+
         try:
             entry = self.root.getEntryFromPath(path)
-        except FileNotFoundError:
+
+        except FileNotFoundError as e:
+            debugOutputToLog('>> bad exit: ENOENT', e)
             return -errno.ENOENT
 
         return entry.getAttr()
 
     def readdir(self, path, offset):
+        debugOutputToLog(f'entering readdir with args {filterLocals(locals())}')
+
         directory = self.root.getEntryFromPath(path)
 
         for ent in directory.getEntries():
             yield Direntry(ent)
 
     def open(self, path, flags):
+        debugOutputToLog(f'entering open with args {filterLocals(locals())}')
+
         try:
             if isinstance(self.root.getEntryFromPath(path), SB3Directory):
+                debugOutputToLog('>> bad exit: EISDIR')
                 return -errno.EISDIR
-        except FileNotFoundError:
+
+        except FileNotFoundError as e:
+            debugOutputToLog('>> bad exit: ENOENT', e)
             return -errno.ENOENT
 
     def read(self, path, size, offset):
-        buffer = b''
+        debugOutputToLog(f'entering read with args {filterLocals(locals())}')
 
+        buffer = b''
         try:
             entry = self.root.getEntryFromPath(path)
             if isinstance(entry, SB3Directory):
+                debugOutputToLog('>> bad exit: EISDIR')
                 return -errno.EISDIR
 
             # ? This means every read call will restore self.backup bytearray
             # ? from backend.data file. This fact can be used to revert the
             # ? filesystem back to a previous state
-            self.restoreBackendFromFile()
+            self.restoreBackendDataFromFile()
 
             if offset < entry.sizeBytes:
                 if offset + size > entry.sizeBytes:
@@ -273,12 +316,16 @@ class StrongBox3(Fuse):
 
                 buffer = entry.getContents(size, offset)
 
+            debugOutputToLog('>> good exit')
             return bytes(buffer)
 
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            debugOutputToLog('>> bad exit: ENOENT', e)
             return -errno.ENOENT
 
     def write(self, path, buffer, offset):
+        debugOutputToLog(f'entering write with args {filterLocals(locals())}')
+
         try:
             entry = self.root.getEntryFromPath(path)
             size = len(buffer)
@@ -286,38 +333,56 @@ class StrongBox3(Fuse):
             # ? This means every write call will restore self.backup bytearray
             # ? from backend.data file. This fact can be used to revert the
             # ? filesystem back to a previous state
-            self.restoreBackendFromFile()
+            self.restoreBackendDataFromFile()
 
             if isinstance(entry, SB3Directory):
+                debugOutputToLog('>> bad exit: EISDIR')
                 return -errno.EISDIR
 
             if offset >= entry.sizeBytes or offset + size > entry.sizeBytes:
+                debugOutputToLog('>> bad exit: EFBIG')
                 return -errno.EFBIG
 
             entry.setContents(bytes(buffer), offset)
-            self.commitBackendToFile()
 
+            self.commitBackendDataToFile()
+            self.commitBackendXTSToFile()
+
+            debugOutputToLog('>> good exit')
             return len(buffer)
 
-        except FileNotFoundError:
+        except FileNotFoundError as e:
+            debugOutputToLog('>> bad exit: ENOENT', e)
             return -errno.ENOENT
 
     def mknod(self, path, mode, dev):
+        debugOutputToLog(f'entering mknod with args {filterLocals(locals())}')
+
         try:
             self.root.getEntryFromPath(path)
-        except FileNotFoundError:
+
+        except FileNotFoundError as e:
+            debugOutputToLog('>> bad exit: EINVAL', e)
             return -errno.EINVAL
 
     def utime(self, path, times):
+        debugOutputToLog(f'entering utime with args {filterLocals(locals())}')
+
         try:
             self.root.getEntryFromPath(path)
-        except FileNotFoundError:
+
+        except FileNotFoundError as e:
+            debugOutputToLog('>> bad exit: ENOENT', e)
             return -errno.ENOENT
 
     def utimens(self, path, ts_acc, ts_mod):
+        debugOutputToLog(f'entering utimens with args {filterLocals(locals())}')
+
         try:
             self.root.getEntryFromPath(path)
-        except FileNotFoundError:
+
+        except FileNotFoundError as e:
+            debugOutputToLog('>> bad exit: ENOENT', e)
             return -errno.ENOENT
 
     # ! Required for openat() syscall to work with FUSE or you get ENOSYS error
@@ -344,22 +409,25 @@ Userspace StrongBox3 AES-XTS encrypted filesystem dummy filesystem.
 
     if args.mount_expected() and args.mountpoint is not None:
         # ? Clear out GOAL_FILE_DIR of all goal files (and keep .gitkeep)
-        for file in [f for f in os.listdir(GOAL_FILE_DIR) if f.endswith('.{}'.format(FILE_EXT))]:
+        for file in [f for f in os.listdir(GOAL_FILE_DIR) if f.endswith(f'.{FILE_EXT}')]:
             os.remove(os.path.join(GOAL_FILE_DIR, file))
+
+        iterName = 1
 
         # ? Serialize goal files
         for fileMeta in goalFiles:
-            fileActual = '{}{}{}'.format(GOAL_FILE_DIR, os.sep, fileMeta.name)
+            fileActual = f'{GOAL_FILE_DIR}{os.sep}{str(iterName)}.{FILE_EXT}'
+            iterName += 1
 
-            print('Goal file: {}'.format(fileMeta.name))
-            print('Goal path: {}'.format(fileMeta.path))
-            print('Goal hash: {}'.format(fileMeta.getHashedContents()))
+            print(f'Goal file: {fileMeta.name}')
+            print(f'Goal path: {fileMeta.path}')
+            print(f'Goal hash: {fileMeta.getHashedContents()}')
 
             with open(fileActual, 'wb', 0) as file:
                 file.write(fileMeta.getContents())
 
             with open(fileActual, 'rb', 0) as file:
-                print('File hash: {}'.format(hashlib.sha256(file.read()).hexdigest()[0:5]))
+                print(f'File hash: {hashlib.sha256(file.read()).hexdigest()[0:5]}')
                 print('(two hashes should match!)')
 
         sb3.main()

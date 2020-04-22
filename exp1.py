@@ -2,27 +2,31 @@
 
 import os
 import sys
+import random
 
 def main():
     goalFile = [f for f in os.listdir('goals') if f.endswith('.xts')]
 
     if len(goalFile):
         goalFile = goalFile[0]
-        print('Using goal file ({})'.format(goalFile))
+        print(f'Looking for goal file ({goalFile}) in encrypted filesystem')
 
     else:
-        raise FileNotFoundError()
+        raise FileNotFoundError('Could not find goal file')
 
     goalFileContents = None
 
     with open(os.path.join('goals', goalFile), 'rb', 0) as file:
         goalFileContents = file.read()
 
+    print('Iterating in random order')
+
     for root, _, files in os.walk('test'):
+        random.shuffle(files)
         for filename in files:
             targetFilename = os.path.join(root, filename)
 
-            print('Trying file {}...'.format(targetFilename))
+            print(f'Trying file {targetFilename}...')
 
             os.sync()
 
@@ -42,7 +46,7 @@ def main():
                 newXTSContents = xtsFile.read()
 
             if oldXTSContents == newXTSContents:
-                print('SUCCESS: found goalfile under path {} via XTS ciphertext match'.format(targetFilename))
+                print(f'SUCCESS: found goalfile under path {targetFilename} via XTS ciphertext match')
                 return
 
             with open('backend.data', 'wb', 0) as backendFile:
@@ -54,13 +58,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-    # For all files in filesystem (ls-like)
-    #   overwrite it with the goal file
-    #   compare current to previous backend_xts
-    #       if they match, file exists, exit with FOUND
-    #       if they don't match, revert to previous backend (via read), continue
-    #       if we exhaust all files, then file doesn't exist, exit with NOTFOUND
-    pass
